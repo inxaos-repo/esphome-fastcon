@@ -131,75 +131,98 @@ namespace esphome
             }
         }
 
-        std::vector<uint8_t> FastconController::get_light_data(light::LightState *state)
+        // Protocol (inner light data, 6 bytes when on):
+        //   [0] 0x80 | brightness(0..127)  [1] blue  [2] red  [3] green  [4] warm  [5] cold
+        // Captures of the brMesh app (scross01/esphome-fastcon docs/GROUP_PROTOCOL.md) show the
+        // white channels are a linear mix that sums to 0xFF (warm FF/00, middle 7F/80, cold 00/FF)
+        // with brightness carried only in byte 0, and plain "white" sent as 7F/7F with RGB zero.
+        static inline uint8_t clamp_u8(float v)
         {
-            std::vector<uint8_t> light_data = {
-                0, // 0 - On/Off Bit + 7-bit Brightness
-                0, // 1 - Blue byte
-                0, // 2 - Red byte
-                0, // 3 - Green byte
-                0, // 4 - Warm byte
-                0  // 5 - Cold byte
-            };
+            if (v < 0.0f)
+                v = 0.0f;
+            if (v > 255.0f)
+                v = 255.0f;
+            return static_cast<uint8_t>(v + 0.5f);
+        }
 
-            // TODO: need to figure out when esphome is changing to white vs setting brightness
+        void FastconController::fill_white(std::vector<uint8_t> &d, float mireds, WhiteMode mode)
+        {
+            // warm fraction: 0 at 153 mired (cold), 1 at 500 mired (warm)
+            float f = (mireds - 153.0f) / (500.0f - 153.0f);
+            if (f < 0.0f)
+                f = 0.0f;
+            if (f > 1.0f)
+                f = 1.0f;
+            switch (mode)
+            {
+            case WhiteMode::FIXED:
+                d[4] = 0x7F;
+                d[5] = 0x7F;
+                break;
+            case WhiteMode::RGB_EMULATED:
+            {
+                // approximate black-body tint on the RGB LEDs (cold = white, warm = amber)
+                d[2] = 0xFF;                               // red
+                d[3] = clamp_u8(255.0f - f * 115.0f);      // green 255 -> 140
+                d[1] = clamp_u8(255.0f - f * 225.0f);      // blue 255 -> 30
+                d[4] = 0;
+                d[5] = 0;
+                break;
+            }
+            case WhiteMode::CCT:
+            default:
+            {
+                uint8_t warm = clamp_u8(f * 255.0f);
+                d[4] = warm;
+                d[5] = 255 - warm;
+                break;
+            }
+            }
+        }
+
+        std::vector<uint8_t> FastconController::get_light_data(light::LightState *state, WhiteMode white_mode)
+        {
+            std::vector<uint8_t> light_data = {0, 0, 0, 0, 0, 0};
 
             auto values = state->current_values;
-
-            bool is_on = values.is_on();
-            if (!is_on)
+            if (!values.is_on())
             {
                 return std::vector<uint8_t>({0x00});
             }
 
+            float brightness = std::min(values.get_brightness() * 127.0f, 127.0f);
+            uint8_t bri7 = static_cast<uint8_t>(brightness + 0.5f);
+            if (bri7 == 0)
+                bri7 = 1;
+            light_data[0] = 0x80 | bri7;
+
             auto color_mode = values.get_color_mode();
-            bool has_white = (static_cast<uint8_t>(color_mode) & static_cast<uint8_t>(light::ColorCapability::WHITE)) != 0;
-            float brightness = std::min(values.get_brightness() * 127.0f, 127.0f); // clamp the value to at most 127
-            light_data[0] = 0x80 + static_cast<uint8_t>(brightness);
-
-            if (has_white)
+            switch (color_mode)
             {
-                return std::vector<uint8_t>({static_cast<uint8_t>(brightness)});
-                // DEBUG: when changing to white mode, this should be the payload:
-                // ff0000007f7f
-            }
-
-            bool has_rgb = (static_cast<uint8_t>(color_mode) & static_cast<uint8_t>(light::ColorCapability::RGB)) != 0;
-            if (has_rgb)
-            {
+            case light::ColorMode::RGB:
                 light_data[1] = static_cast<uint8_t>(values.get_blue() * 255.0f);
                 light_data[2] = static_cast<uint8_t>(values.get_red() * 255.0f);
                 light_data[3] = static_cast<uint8_t>(values.get_green() * 255.0f);
-            }
-
-            bool has_cold_warm = (static_cast<uint8_t>(color_mode) & static_cast<uint8_t>(light::ColorCapability::COLD_WARM_WHITE)) != 0;
-            if (has_cold_warm)
-            {
-                light_data[4] = static_cast<uint8_t>(values.get_warm_white() * 255.0f);
-                light_data[5] = static_cast<uint8_t>(values.get_cold_white() * 255.0f);
-            }
-
-            // TODO figure out if we can use these, and how
-            bool has_temp = (static_cast<uint8_t>(color_mode) & static_cast<uint8_t>(light::ColorCapability::COLOR_TEMPERATURE)) != 0;
-            if (has_temp)
-            {
-                float temperature = values.get_color_temperature();
-                if (temperature < 153)
-                {
-                    light_data[4] = 0xff;
-                    light_data[5] = 0x00;
-                }
-                else if (temperature > 500)
-                {
-                    light_data[4] = 0x00;
-                    light_data[5] = 0xff;
-                }
+                if (light_data[1] || light_data[2] || light_data[3])
+                    break;
+                // rgb(0,0,0) would be "on but dark": fall back to warm white
+                fill_white(light_data, 500.0f, white_mode);
+                break;
+            case light::ColorMode::COLOR_TEMPERATURE:
+            case light::ColorMode::COLD_WARM_WHITE:
+                fill_white(light_data, values.get_color_temperature(), white_mode);
+                break;
+            case light::ColorMode::WHITE:
+                // plain white as sent by the app: 7F/7F (neutral) - full 6-byte payload
+                if (white_mode == WhiteMode::RGB_EMULATED)
+                    fill_white(light_data, 326.0f, white_mode);
                 else
-                {
-                    // Linear interpolation between (153, 0xff) and (500, 0x00)
-                    light_data[4] = (uint8_t)(((500 - temperature) * 255.0f + (temperature - 153) * 0x00) / (500 - 153));
-                    light_data[5] = (uint8_t)(((temperature - 153) * 255.0f + (500 - temperature) * 0x00) / (500 - 153));
-                }
+                    fill_white(light_data, 0.0f, WhiteMode::FIXED);
+                break;
+            default:
+                // BRIGHTNESS / UNKNOWN (e.g. turned on with no colour info): warm white
+                fill_white(light_data, 500.0f, white_mode);
+                break;
             }
 
             return light_data;

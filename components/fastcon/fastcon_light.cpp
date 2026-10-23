@@ -29,7 +29,7 @@ namespace esphome
         light::LightTraits FastconLight::get_traits()
         {
             auto traits = light::LightTraits();
-            traits.set_supported_color_modes({light::ColorMode::RGB, light::ColorMode::WHITE, light::ColorMode::BRIGHTNESS, light::ColorMode::COLD_WARM_WHITE});
+            traits.set_supported_color_modes({light::ColorMode::RGB, light::ColorMode::WHITE, light::ColorMode::BRIGHTNESS, light::ColorMode::COLOR_TEMPERATURE});
             traits.set_min_mireds(153);
             traits.set_max_mireds(500);
             return traits;
@@ -38,7 +38,7 @@ namespace esphome
         void FastconLight::write_state(light::LightState *state)
         {
             // Get the light data bits from the state
-            auto light_data = this->controller_->get_light_data(state);
+            auto light_data = this->controller_->get_light_data(state, this->white_mode_);
 
             // Debug output - print the light state values
             bool is_on = (light_data[0] & 0x80) != 0;
