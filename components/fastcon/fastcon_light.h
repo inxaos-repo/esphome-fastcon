@@ -26,10 +26,12 @@ namespace esphome
             light::LightTraits get_traits() override;
             void write_state(light::LightState *state) override;
             void set_controller(FastconController *controller);
+            void set_white_mode(uint8_t mode) { this->white_mode_ = static_cast<WhiteMode>(mode); }
 
         protected:
             FastconController *controller_{nullptr};
             uint8_t light_id_;
+            WhiteMode white_mode_{WhiteMode::CCT};
         };
     } // namespace fastcon
 } // namespace esphome

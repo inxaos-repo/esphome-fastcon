@@ -12,6 +12,13 @@ namespace esphome
     namespace fastcon
     {
 
+        enum class WhiteMode : uint8_t
+        {
+            CCT = 0,          // warm/cold linear mix summing to 0xFF (brMesh app)
+            FIXED = 1,        // always warm=cold=0x7F (app "white" button)
+            RGB_EMULATED = 2  // no CW/WW channels: tint the RGB LEDs
+        };
+
         class FastconController : public Component
         {
         public:
@@ -20,7 +27,8 @@ namespace esphome
             void setup() override;
             void loop() override;
 
-            std::vector<uint8_t> get_light_data(light::LightState *state);
+            std::vector<uint8_t> get_light_data(light::LightState *state, WhiteMode white_mode = WhiteMode::CCT);
+            static void fill_white(std::vector<uint8_t> &d, float mireds, WhiteMode mode);
             std::vector<uint8_t> single_control(uint32_t addr, const std::vector<uint8_t> &light_data);
 
             void queueCommand(uint32_t light_id_, const std::vector<uint8_t> &data);
